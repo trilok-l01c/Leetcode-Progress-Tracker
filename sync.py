@@ -141,7 +141,6 @@ def sync_to_notion(existing_problems, solved_problems):
     print("Starting sync...")
     print(f"{'='*60}\n")
     
-    updated = 0
     skipped = 0
     created = 0
     
