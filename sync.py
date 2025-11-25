@@ -2,6 +2,9 @@
 
 import os
 import requests
+import time
+import socket
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,6 +20,39 @@ NOTION_HEADERS = {
     "Notion-Version": NOTION_VERSION
 }
 
+def check_internet_connection(timeout=5):
+    """
+    Check if internet connection is available by trying to connect to Google DNS
+    """
+    try:
+        socket.create_connection(("8.8.8.8", 53), timeout=timeout)
+        return True
+    except OSError:
+        return False
+
+def wait_for_internet(max_retries=None, retry_interval=30):
+    """
+    Wait for internet connection with exponential backoff.
+    If max_retries is None, it will retry indefinitely.
+    retry_interval is the initial wait time in seconds.
+    """
+    attempt = 0
+    while True:
+        if check_internet_connection():
+            print(f"✓ Internet connection restored at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            return True
+        
+        attempt += 1
+        if max_retries is not None and attempt > max_retries:
+            print(f"✗ Failed to connect after {max_retries} attempts")
+            return False
+        
+        wait_time = retry_interval * (2 ** (attempt - 1)) if attempt > 1 else retry_interval
+        wait_time = min(wait_time, 300)  # Cap at 5 minutes
+        
+        print(f"No internet connection. Waiting {wait_time}s before retry (attempt {attempt})...")
+        time.sleep(wait_time)
+
 def get_existing_problems():
     """
     Returns a dict mapping problem_id -> notion page_id
@@ -26,6 +62,12 @@ def get_existing_problems():
     start_cursor = None
     
     print("Checking existing problems in Notion...")
+    
+    if not check_internet_connection():
+        print("No internet connection. Waiting for connection...")
+        if not wait_for_internet():
+            print("Could not establish internet connection")
+            return existing
     
     try:
         while has_more:
@@ -96,6 +138,12 @@ def get_all_solved_problems():
     limit = 100
     
     print("\nFetching solved problems from LeetCode...")
+    
+    if not check_internet_connection():
+        print("No internet connection. Waiting for connection...")
+        if not wait_for_internet():
+            print("Could not establish internet connection")
+            return all_solved
     
     while True:
         payload = {
@@ -199,6 +247,13 @@ def main():
     if not all([NOTION_TOKEN, DATABASE_ID, LEETCODE_SESSION, LEETCODE_CSRF]):
         print("ERROR: Missing credentials in .env file!")
         return
+    
+    # Wait for internet connection before starting
+    if not check_internet_connection():
+        print("No internet connection at startup. Waiting for connection...")
+        if not wait_for_internet():
+            print("Could not establish internet connection. Aborting sync.")
+            return
     
     # Step 1: Get existing problems from Notion
     existing_problems = get_existing_problems()
