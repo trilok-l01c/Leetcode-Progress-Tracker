@@ -4,6 +4,7 @@ import os
 import requests
 import time
 import socket
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -96,6 +97,26 @@ def get_existing_problems():
     
     return existing
 
+def find_submission_property_name():
+    """
+    Inspect the Notion database properties and return the property name
+    that likely corresponds to the "submission" column (case-insensitive match).
+    Returns None if not found.
+    """
+    try:
+        url = f"https://api.notion.com/v1/databases/{DATABASE_ID}"
+        response = requests.get(url, headers=NOTION_HEADERS)
+        response.raise_for_status()
+        data = response.json()
+        props = data.get("properties", {})
+        for name, meta in props.items():
+            if "submiss" in name.lower():
+                # return property name and its type (e.g., 'date', 'number')
+                return name, meta.get("type")
+    except Exception:
+        pass
+    return None, None
+
 def get_all_solved_problems():
     """
     Fetch all solved problems from LeetCode
@@ -181,7 +202,118 @@ def get_all_solved_problems():
     print(f"✓ Total solved: {len(all_solved)}")
     return all_solved
 
-def sync_to_notion(existing_problems, solved_problems):
+
+def get_problem_submission_count(title_slug):
+    """
+    Fetch per-problem stats from LeetCode and try to extract total submissions.
+    Returns an int or None.
+    """
+    url = "https://leetcode.com/graphql"
+    query = '''
+    query questionData($titleSlug: String!) {
+      question(titleSlug: $titleSlug) {
+        stats
+      }
+    }
+    '''
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Cookie": f"LEETCODE_SESSION={LEETCODE_SESSION}; csrftoken={LEETCODE_CSRF}",
+        "x-csrftoken": LEETCODE_CSRF,
+        "Referer": "https://leetcode.com"
+    }
+    try:
+        payload = {"query": query, "variables": {"titleSlug": title_slug}}
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        stats_str = data.get("data", {}).get("question", {}).get("stats")
+        if not stats_str:
+            return None
+        stats = json.loads(stats_str)
+        # Common keys: totalSubmissionRaw, totalSubmission, totalSubmissionCount
+        for key in ("totalSubmissionRaw", "totalSubmission", "totalSubmissionCount", "total_submissions"):
+            val = stats.get(key)
+            if val is None:
+                continue
+            # val might be int or string with commas
+            try:
+                if isinstance(val, str):
+                    cleaned = val.replace(",", "").strip()
+                    return int(cleaned)
+                return int(val)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def get_problem_submission_date(title_slug, max_pages=20, page_limit=20):
+    """
+    Try to find the user's accepted submission date for a problem by
+    paginating the authenticated submission list via GraphQL.
+
+    Returns ISO 8601 date string (YYYY-MM-DD) if found, otherwise None.
+    """
+    url = "https://leetcode.com/graphql"
+    query = '''
+    query submissionList($offset: Int!, $limit: Int!) {
+      submissionList(offset: $offset, limit: $limit) {
+        submissions {
+          id
+          statusDisplay
+          timestamp
+          titleSlug
+        }
+        hasNext
+      }
+    }
+    '''
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Cookie": f"LEETCODE_SESSION={LEETCODE_SESSION}; csrftoken={LEETCODE_CSRF}",
+        "x-csrftoken": LEETCODE_CSRF,
+        "Referer": "https://leetcode.com"
+    }
+
+    offset = 0
+    pages = 0
+    try:
+        while pages < max_pages:
+            payload = {"query": query, "variables": {"offset": offset, "limit": page_limit}}
+            resp = requests.post(url, json=payload, headers=headers, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            subs_block = data.get("data", {}).get("submissionList", {})
+            submissions = subs_block.get("submissions", [])
+            for s in submissions:
+                if s.get("titleSlug") == title_slug and s.get("statusDisplay", "").lower() in ("accepted", "ac"):
+                    ts = s.get("timestamp")
+                    if ts:
+                        # timestamp is often in seconds; convert to ISO date
+                        try:
+                            ts_int = int(ts)
+                            dt = datetime.fromtimestamp(ts_int)
+                            return dt.strftime("%Y-%m-%d")
+                        except Exception:
+                            # sometimes it may already be ISO; attempt parse
+                            try:
+                                return ts.split("T")[0]
+                            except Exception:
+                                return None
+            has_next = subs_block.get("hasNext", False)
+            if not has_next:
+                break
+            offset += page_limit
+            pages += 1
+    except Exception:
+        pass
+    return None
+
+def sync_to_notion(existing_problems, solved_problems, submission_property=None):
     """
     Sync problems to Notion - update existing, create new
     """
@@ -217,6 +349,29 @@ def sync_to_notion(existing_problems, solved_problems):
                 "url": link
             }
         }
+        # If database has a submission column, fetch submission info and include it
+        if submission_property and submission_property[0]:
+            prop_name, prop_type = submission_property
+            try:
+                if prop_type == "date":
+                    sub_date = get_problem_submission_date(titleSlug)
+                    if sub_date:
+                        properties[prop_name] = {"date": {"start": sub_date}}
+                elif prop_type == "number":
+                    sub_count = get_problem_submission_count(titleSlug)
+                    if sub_count is not None:
+                        properties[prop_name] = {"number": sub_count}
+                else:
+                    # default: try to fetch date first, fallback to number
+                    sub_date = get_problem_submission_date(titleSlug)
+                    if sub_date:
+                        properties[prop_name] = {"date": {"start": sub_date}}
+                    else:
+                        sub_count = get_problem_submission_count(titleSlug)
+                        if sub_count is not None:
+                            properties[prop_name] = {"number": sub_count}
+            except Exception:
+                pass
         
         try:
             if problem_id in existing_problems:
@@ -265,8 +420,17 @@ def main():
         print("No solved problems found!")
         return
     
+    # Detect submission property name in the Notion database (if any)
+    submission_prop_name, submission_prop_type = find_submission_property_name()
+    if submission_prop_name:
+        print(f"Detected submission property in Notion DB: '{submission_prop_name}' (type={submission_prop_type})")
+        submission_prop = (submission_prop_name, submission_prop_type)
+    else:
+        print("No submission property detected in Notion DB; skipping submission counts")
+        submission_prop = (None, None)
+
     # Step 3: Sync to Notion (update existing, create new)
-    sync_to_notion(existing_problems, solved_problems)
+    sync_to_notion(existing_problems, solved_problems, submission_property=submission_prop)
 
 if __name__ == "__main__":
     print("LeetCode → Notion Sync")

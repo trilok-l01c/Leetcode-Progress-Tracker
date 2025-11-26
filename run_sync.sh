@@ -9,8 +9,8 @@ LOG_FILE="$PROJECT_DIR/sync.log"
 # Check if python path exists (handles both old and new location)
 if [ -f "$PROJECT_DIR/venv/bin/python" ]; then
     PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
-elif [ -f "/home/trilok-lowanshi/LeetCodeNotionProject/venv/bin/python" ]; then
-    PYTHON_BIN="/home/trilok-lowanshi/LeetCodeNotionProject/venv/bin/python"
+elif [ -f "/home/trilok-lowanshi/Resources/LeetCodeNotionProject/venv/bin/python" ]; then
+    PYTHON_BIN="/home/trilok-lowanshi/Resources/LeetCodeNotionProject/venv/bin/python"
 else
     PYTHON_BIN="python3"
 fi
